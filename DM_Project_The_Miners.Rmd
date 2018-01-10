@@ -1,0 +1,726 @@
+---
+title: "DM_Project"
+author: amodi1, ryellajo, paveeths,pnarang
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    theme: cerulean
+    highlight: tango
+---
+
+### Preamble - Loading Packages
+```{r setup,warning = FALSE}
+
+library(data.table)
+library(ggplot2)
+library(plyr)
+library(glmnet)
+library(dplyr)
+library(leaps)
+library(randomForest)
+library(knitr)
+library(klaR)
+library(bestglm)
+library(xlsx)
+
+set.seed(14504008)
+
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+options(scipen = 4)
+knitr::opts_chunk$set(echo = TRUE) 
+```
+### Data Exploration
+
+##### **(a)** Loading the Data. 
+> The columns in the dataset are listed below.
+
+```{r }
+suggestions = read.csv("suggestions.csv", header = TRUE)
+#View(suggestions)
+names(suggestions) 
+```
+> Here the "Recommended"" column is the identifier for a good or a bad post. Given below is the ratio of good and bad posts in the dataset.
+
+<div>
+<li>'1' Represents good post.
+<li>'0' Represents bad post.
+</div>
+
+```{r}
+table(suggestions$Recommended) # count
+prop.table(table(suggestions$Recommended)) # proportion
+```
+##### **(b)** Cleaning Data
+
+> Removing certain duplicate records
+
+**SuggestionID is the Unique Id for every suggestion. There were some duplicate records observed in the data, which are removed below.**
+
+```{r }
+print(paste0("Number of Records - ",nrow(suggestions)))
+print(paste0("Number of Unique suggestion Ids - ",length(unique(suggestions$Suggestion_Id))))
+
+## Removing Duplicate Records
+
+duplicate = list()
+
+for ( i in unique(suggestions$Suggestion_Id)){
+  count=0
+  for (j in suggestions$Suggestion_Id){
+    if(i==j) {
+      count=count+1
+      if(count>=2){
+          duplicate <- c(duplicate,j)
+      }
+      }
+    }
+  }
+## Ids of duplicate Records
+duplicate_ids = unique(duplicate)
+duplicate_ids
+```
+
+> Displaying records with duplicate IDS
+
+```{r }
+suggestions[suggestions$Suggestion_Id %in% duplicate_ids,]
+```
+
+> The duplicate rows have similar data except for zeros in "Responses" and "Views". We will remove these rows
+
+```{r}
+suggestions_clean = suggestions[-c(29,30,4273,4274,4383,4768),]
+nrow(suggestions_clean)
+length(unique(suggestions_clean$Suggestion_Id))
+
+suggestions_clean = subset(suggestions_clean, select=-Suggestion_Id) ## drop column with unique data
+```
+
+
+##### **(c)** Visualisation of available features.
+
+> Given below are certain visualisations to view the distribution of values in certain features.
+
+<p>Changing categorical variable "Recommended" from numeric to  yes/no [for visualisation]</p>
+
+```{r }
+suggestions_vis = transform(suggestions_clean, 
+                   Recommended = mapvalues(Recommended, c(0,1), 
+                                      c("Yes", "No")))
+```
+
+<p>Views vs Recommended</p>
+
+```{r }
+qplot(data = suggestions_vis, x = Recommended, y = Views+1 , fill = I(cbPalette[3]), geom = "boxplot")+ coord_trans( y = "log10")
+
+range(suggestions_vis$Views)
+```
+<p>Votes_Up vs Recommended</p>
+
+```{r}
+qplot(data = suggestions_vis, x = Recommended, y = Votes_Up+1 , fill = I(cbPalette[3]), geom = "boxplot")+coord_trans( y = "log10")
+```
+<p>Votes_Down vs Recommended</p>
+
+```{r}
+qplot(data = suggestions_vis, x = Recommended, y = Votes_Down+1 , fill = I(cbPalette[3]), geom = "boxplot")+coord_trans( y = "log10")
+```
+
+<p>Intuitively selected features seem to not contribute much to the label visually due to many 0s in the data. Thus We are adding some engineered features to check if they are good predictors.</p>
+
+### Feature Engineering
+
+##### **(d)** Feature Engineered Data 
+<p>
+<div>
+Since posts maybe new and some maybe old, comparing certain features directly may not be a direct indicator of whether the post is good or not. Thus we are adding the folowing ratios to check if they are significant.
+<li>Ratio of Votes_Up and Votes_Down
+<li>Ratio of Responses and Views
+<li>Votes Up and Views
+<li>Votes Down and Views
+</div>
+</p>
+<p>While calculating Vote ratio, since many records contain 0s, to avoid NAs & Infs, we change the denominator from 0 to 1 </p>
+
+```{r }
+# Votes_up vs Votes_down
+suggestions_new = data.frame(suggestions_clean)
+zero_index <- suggestions_new$Votes_Down== 0
+down = suggestions_new$Votes_Down
+down[zero_index] <- 1
+suggestions_new["ratio_Votes"] <- suggestions_new[,"Votes_Up"]/down
+
+# Responses vs Views
+ratio_response = suggestions_new[,"Responses"]/suggestions_new[,"Views"]
+ratio_response[is.na(ratio_response)] <- 0
+suggestions_new["Ratio_Responses"] <- ratio_response
+
+#View(suggestions_new)
+```
+
+```{r }
+# Votes_up vs Views
+zero_index <- suggestions_new$Views== 0
+views <- suggestions_new$Views
+views[zero_index] <- 1
+suggestions_new["upToViews"] <- suggestions_new[,"Votes_Up"]/views
+
+# Votes_down vs Views
+suggestions_new["downToViews"] <- suggestions_new[,"Votes_Down"]/views
+
+#View(suggestions_new)
+```
+
+##### **(e)** Visualisation of new columns
+
+```{r}
+suggestions_vis = transform(suggestions_new, 
+                   Recommended = mapvalues(Recommended, c(0,1), 
+                                      c("Yes", "No")))
+qplot(data = suggestions_vis, x = Recommended, y = Ratio_Responses , fill = I(cbPalette[3]), geom = "boxplot")
+qplot(data = suggestions_vis, x = Recommended, y = ratio_Votes , fill = I(cbPalette[3]), geom = "boxplot")
+qplot(data = suggestions_vis, x = Recommended, y = upToViews , fill = I(cbPalette[3]), geom = "boxplot")+coord_cartesian(ylim = c(0, 1))
+qplot(data = suggestions_vis, x = Recommended, y = downToViews , fill = I(cbPalette[3]), geom = "boxplot")+coord_cartesian(ylim = c(0, 0.5))
+```
+<p>
+<div>
+The following Inferences can be made from the above visualisations -
+<li> Higher Ratio of Responses to Views seems to be slightly indicative of a good suggestion
+<li>Higher Ratio of upvotes to downvotes is indicative of a bad suggestion
+<li>Higher Ratio of upvotes to views is indicative of a bad suggestion
+<li>Higher Ratio of downvotes to views is indicative of a good suggestion
+</div>
+</p>
+### Feature Selection
+
+##### **(f)** Baseline Logistic Regression for significant features
+
+> To identify the features most predictive of a good/bad suggestion using the P-values
+
+```{r}
+suggestions.glm = glm(Recommended~ .,family=binomial, data = suggestions_new)
+summary(suggestions.glm)
+```
+> Logistic regression after downsampling 
+
+```{r}
+suggestions_0 = suggestions_new[suggestions_new$Recommended==0,]
+suggestions_1 = suggestions_new[suggestions_new$Recommended==1,]
+suggestions_0_sample = suggestions_0[sample(1:nrow(suggestions_1)),]
+suggestions_new1 = rbind(suggestions_1,suggestions_0_sample)
+
+suggestions.glm1 = glm(Recommended~ .,family=binomial, data = suggestions_new1)
+summary(suggestions.glm1)
+```
+
+<p>
+From The above observations we can say that certaiin features are clearly predictive in the classification task. This includes -Responses, Views, Votes_Down, Author_Id, Author_Join, Author_PostsPerDay and ratio_Votes.*
+*Before proceeding with feature selection, we would like to look at some feature selection methods to check which parameters among these is the smallest set of predictive features since unregularized regression does not capture interaction among terms.
+</p>
+
+##### **(g)** Correlation Analysis
+
+> Pairplots
+
+```{r pressure, echo=FALSE}
+
+panel.cor <- function(x, y, digits = 2, prefix = "", cex.cor, ...)
+{
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    r <- abs(cor(x, y))
+    txt <- format(c(r, 0.123456789), digits = digits)[1]
+    txt <- paste0(prefix, txt)
+    if(missing(cex.cor)) cex.cor <- 0.8/strwidth(txt)
+    text(0.5, 0.5, txt, cex = pmax(1, cex.cor * r))
+}
+attach(suggestions_new)
+suggestions.var.names = names(suggestions_new)
+# Use panel.cor to display correlations in lower panel.
+pairs(suggestions_new[,suggestions.var.names], lower.panel = panel.cor)
+detach(suggestions_new)
+```
+
+<p>We can clearly see that certain features are correlated. Including both among such correlated pairs would mean redundancy of information, more time to train the model [In case of extremely large datasets] and can potentially add noise to the model.</p>
+
+> Heat Map for correlation
+
+```{r}
+qplot(x=Var1, y=Var2, data=melt(cor(suggestions_new)), fill=value, geom="tile")+ theme(axis.text.x = element_text(angle=60, hjust=1))
+```
+<div>
+We can notice high correlation between the following pairs-
+<li>Author_id and days since joined - This can be inferred as ids being assigned as newer employees join
+<li>Author_totalposts and Author_postsperday
+</div>
+<p>
+Since these variables are highly correlated, we can remove one among each pair.
+</p>
+
+> Logistic regression after feature removal based on above analysis
+
+```{r}
+suggestions_new2 = subset(suggestions_new1,select = -c(Author_Id,Author_PostsPerDay))
+suggestions.glm2 = glm(Recommended~ .,family=binomial, data = suggestions_new2)
+summary(suggestions.glm2)
+
+```
+
+##### **(h)** Feature Selection through best subest selection and Regularisation
+
+**Best Subest selection tries to find the best choice of predictors to use. Below are Forward and Backwars stepwise selection methods that pick the best model by using AIC and BIC as penalising factors**
+
+> Forward Stepwise with AIC
+
+```{r warning=FALSE,cache=TRUE}
+#Forward-AIC takes around 15 minutes to run
+suggestions_new.best.logistics <- within(suggestions_new, {
+    y <- Recommended         # bwt into y
+    Recommended <- NULL
+})
+
+suggestions_new.stepwise <-
+    suggestions_new.best.logistics[, c("Responses","Views","Votes_Up","Votes_Down","Author_Id","Author_Join..in.terms.of.how.many.days.since.they.joined.","Author_TotalPosts","Author_PostsPerDay","ratio_Votes","Ratio_Responses","upToViews","downToViews","y")]
+
+fwd.best.logisticAIC <-
+    bestglm(Xy = suggestions_new.stepwise,
+            family = binomial,          # binomial family for logistic
+            IC = "AIC",                 # Information criteria for
+            method = "forward")
+
+fwd.best.logisticAIC$BestModels
+formula(fwd.best.logisticAIC$BestModel)
+
+plot(seq_len(nrow(fwd.best.logisticAIC$Subsets)) - 1, fwd.best.logisticAIC$Subsets[,"AIC"], type="b", xlab = "Number of Predictors", ylab = "AIC")
+
+```
+
+** Feature Selection (Forward Selection - AIC) gives the minimum AIC with 8 predictors model: Responses + Views + Votes_Down + Author_Id + Author_PostsPerDay + ratio_Votes + Ratio_Responses + downToViews**
+    
+> Backward stepwise - AIC
+
+```{r warning=FALSE,cache=TRUE}
+#Backward-AIC takes around 15 minutes to run
+bckwd.best.logisticAIC <-
+    bestglm(Xy = suggestions_new.stepwise,
+            family = binomial,          # binomial family for logistic
+            IC = "AIC",                 # Information criteria for
+            method = "backward")
+
+bckwd.best.logisticAIC$BestModels
+formula(bckwd.best.logisticAIC$BestModel)
+
+plot(seq_len(nrow(bckwd.best.logisticAIC$Subsets)) - 1, bckwd.best.logisticAIC$Subsets[,"AIC"], type="b", xlab = "Number of Predictors", ylab = "AIC")
+```
+
+** Feature Selection (Backward Selection - AIC) also gives the minimum AIC with same 8 predictors model: Responses + Views + Votes_Down + Author_Id + Author_PostsPerDay + ratio_Votes + Ratio_Responses + downToViews** 
+
+> Exhaustive - AIC
+
+```{r warning=FALSE,cache=TRUE}
+
+#Exhaustive-AIC takes around 15 minutes to run
+ex.best.logisticAIC <-
+    bestglm(Xy = suggestions_new.stepwise,
+            family = binomial,          # binomial family for logistic
+            IC = "AIC",                 # Information criteria for
+            method = "exhaustive")
+
+ex.best.logisticAIC$BestModels
+formula(ex.best.logisticAIC$BestModel)
+
+plot(seq_len(nrow(ex.best.logisticAIC$Subsets)) - 1, ex.best.logisticAIC$Subsets[,"AIC"], type="b", xlab = "Number of Predictors", ylab = "AIC")
+
+```
+
+** Feature Selection (Exhaustive AIC):  also gives the minimum AIC with the same 8 predictors model: Responses + Views + Votes_Down + Author_Id + Author_PostsPerDay + ratio_Votes + Ratio_Responses + downToViews** 
+
+
+> Lasso
+
+**An Alternative to Best subset is regularized regression. Herecertain features' regression coefficients are shrunk to zero.**
+
+<p>Best Lambda </p>
+
+```{r}
+x<-as.matrix(suggestions_new1[,-1])
+# Note alpha=1 for lasso only and can blend with ridge penalty down to
+# alpha=0 ridge only.
+glmmod <- glmnet(x, y=suggestions_new1$Recommended, alpha=1, family="binomial")
+
+# Plot variable coefficients vs. shrinkage parameter lambda.
+plot(glmmod, xvar="lambda")
+
+cv.glmmod <- cv.glmnet(x, y=suggestions_new1$Recommended, alpha=1)
+plot(cv.glmmod)
+best.lambda <- cv.glmmod$lambda.min
+se.lambda=cv.glmmod$lambda.1se
+
+lambda.best = predict(glmmod,type = "coefficients", s = best.lambda)
+lambda.best
+
+#mse with min lambda
+print(paste0("mse with min lambda : ",cv.glmmod$cvm[cv.glmmod$lambda == best.lambda]))
+
+```
+
+**Feature Selection after Lasso (Best Lambda) : Responses, Views, Votes_Down,Votes_Up,Author_Id, Author_Join, Author_TotalPosts, Author_PostsPerDay, Ratio_Votes, Ratio_Responses, upToViews, downtoViews **
+
+<p>1SE Lambda </p>
+
+```{r}
+lambda.1se = predict(glmmod,type = "coefficients", s = se.lambda)
+lambda.1se
+
+#mse with 1se lambda
+print(paste0("mse with min lambda :",cv.glmmod$cvm[cv.glmmod$lambda == se.lambda]))
+```
+**Feature Selection after Lasso (Lambda 1SE) : Responses, Views, Votes_Down, Author_Id, Author_PostsPerDay, Ratio_Votes, Ratio_Responses, upToViews**
+
+##### **(i)** Feature Selection through Decision Tree and Random Forests
+
+<p>To get validate the features selected from above methods, Decision Trees and Random Forests were run on the data.</p>
+
+> Decision Tree
+
+```{r}
+tree.sugg <- tree::tree(Recommended ~ . -Recommended, suggestions_new1)
+summary(tree.sugg)
+```
+
+
+```{r}
+plot(tree.sugg)
+text(tree.sugg,pretty=0)
+```
+
+```{r}
+summary(tree.sugg)$used ## variables used
+```
+
+```{r}
+names(suggestions_new)[which(!(names(suggestions_new) %in%summary(tree.sugg)$used))] ## variables not used
+```
+
+>Random Forests
+
+```{r}
+
+set.seed(1)
+suggestions.rf <- randomForest(Recommended ~ .,data=suggestions_new1,mtry=4,importance = TRUE)
+#names(suggestions_new1)
+show(suggestions.rf)
+```
+
+```{r}
+plot(suggestions.rf)
+```
+
+
+<p>The above plot shows the out-of-bag MSE curve as a function of the number of trees </p>
+
+```{r}
+varImpPlot(suggestions.rf,type=2)
+varImpPlot(suggestions.rf,type=1)
+```
+
+>Checking the partial dependence plots for Views, votes_down and ratio_Votes. Partial plots gives a graphical depiction of the marginal effect of a variable on class probability.
+
+```{r}
+partialPlot(suggestions.rf, suggestions_new1, x.var = "ratio_Votes")
+partialPlot(suggestions.rf, suggestions_new1, x.var = "Views")
+partialPlot(suggestions.rf, suggestions_new1, x.var = "Votes_Down")
+```
+
+>Summary of Features selectes
+
+```{r}
+
+feature_data=read.xlsx("Feature Selection Results.xlsx",sheetIndex = 1)
+kable(feature_data)
+```
+
+
+### Modelling Suggestion Quality - Observations
+
+*From Observations so far from regression analysis, Correlation Analysis, Best Subset Selection, Regularized regression and Tree based methods, following are the parameters that are most predictive of whether a suggestion is good are not.*
+
+-*Ratio_Votes*
+-*Responses*
+-*Views*
+-*Votes_Down*
+-*Author_PostsPerDay or Author_TotalPosts*
+
+<p>
+The number of views, number of downvotes and ratio of upvotes to downvotes contribute to predicting a good suggestion.
+But the Ratio of up and down votes is more significant than the number of Views, from the unregularized regression and Random Forest *
+
+*The 'age' of the employee can be considered as the Days since joining for an employee. From the pair plots, we can see that Author_ID and and Author.Join are highly correlated and indicate the "age" of an employee.
+
+From unRegularized regression we can say that these variables are of slight significance but not enough and hence are eliminated by the regularization like Lasso. The importance of these variables from Random Forest is also low. Thus age may not be a contributing factor in producing a good suggestion.
+
+From a real-world perspective this the above observations can be interpreted in the following ways.
+1. Age of an employee does not matter in their ability to produce good suggestions.
+2. The number of votes [Especially downvotes] determine the quality of a suggestion.
+3. Authors who are active and have had many posts in the past as well as post frequently [high daily averages], produce good quality suggestions</p>
+
+##### **(j)** Classifier for Predicting good suggestion - Naive Bayes
+
+> Below is just a sample of how a classification task would be like with the above selected features, balanced dataset and Naive Bayes Classifier.
+
+```{r warning=FALSE}
+suggestions_nb = subset(suggestions_new2,select = c(Recommended, ratio_Votes, Responses, Views, Votes_Down, Author_TotalPosts, Author_Join..in.terms.of.how.many.days.since.they.joined.))
+# shuffling the data
+suggestions_nb <- suggestions_nb[sample(nrow(suggestions_nb)),]
+suggestions_nb = transform(suggestions_nb, 
+                   Recommended = mapvalues(Recommended, c(0,1), 
+                                      c("Yes", "No")))
+suggestions_nb["Recommended"] = as.factor(suggestions_nb$Recommended)
+
+#Density Plots to see how Naive bayes may perform 
+ggplot(suggestions_nb, aes(suggestions_nb$ratio_Votes, fill= suggestions_nb$Recommended)) + geom_density(alpha=0.3)
+
+ggplot(suggestions_nb, aes(suggestions_nb$Responses, fill= suggestions_nb$Recommended)) + geom_density(alpha=0.3)
+
+ggplot(suggestions_nb, aes(suggestions_nb$Views, fill= suggestions_nb$Recommended)) + geom_density(alpha=0.3)
+
+ggplot(suggestions_nb, aes(suggestions_nb$Votes_Down, fill= suggestions_nb$Recommended)) + geom_density(alpha=0.3)
+
+ggplot(suggestions_nb, aes(suggestions_nb$Author_TotalPosts, fill= suggestions_nb$Recommended)) + geom_density(alpha=0.3)
+
+ggplot(suggestions_nb, aes(suggestions_nb$Author_Join..in.terms.of.how.many.days.since.they.joined., fill= suggestions_nb$Recommended)) + geom_density(alpha=0.3)
+
+```
+
+**From the above density plots(if we zoom in) - we can see that Responses, Views and Ratio_Votes seems to be separating the Recommended classes pretty well.**
+
+```{r warning=FALSE}
+sugg.nb = NaiveBayes(Recommended~., data = suggestions_nb, usekernel = TRUE)
+sugg.nb.pred <- predict(sugg.nb,suggestions_nb)
+table(sugg.nb.pred$class,suggestions_nb$Recommended)
+
+print(paste0("Misclassification Rate :", mean(sugg.nb.pred$class != suggestions_nb$Recommended))) ## misclassification rate
+```
+<p>
+Naive Bayes Classifier is able to classify well with a misclassification of only 10% but the prevalence is 50%
+Thus Classifier performance is good.
+</p>
+
+
+### Ranking Authors
+
+> To Check If Employees can be ranked on their ability to make good suggestions, we are first aggregating the suggestions data to form a new dataset with aggregated "suggestion data per author". We are also engineering a factor that can be used as an indicator of the ability of an author to make good suggestions.
+
+<p>The engineered column is a weighted combination of proportion of recommended posts and total posts per author. This is to ensure that authors with small number of total posts do not geta higher ranking owing to just a few good suggestions.At the same time, factor is chosen to give higher rank to an author with higher posts if both of them had same ratio of recommended to not recommended posts
+
+If we are able to create a prediction model for this data on the ranking factor, we should be able to build a completely automated suggestion ranking systems as well as an author ranking system.</p>
+
+##### **(k)** Constructing the Data set
+
+```{r}
+colnames(suggestions_clean)[7]<- "Tenure"
+
+authordf <- suggestions_clean %>%
+  dplyr::select(Author_Id, Tenure, Author_TotalPosts, Author_PostsPerDay,
+         Votes_Down, Votes_Up,Views,Responses, Recommended) %>%
+  dplyr::group_by(Author_Id,Tenure, Author_TotalPosts, Author_PostsPerDay) %>%
+  dplyr::summarise(Votes_Down_mean = mean(Votes_Down), Votes_Up_mean = mean(Votes_Up), Views_mean = mean(Views),Responses_mean = mean(Responses),
+            Votes_Down_sum = sum(Votes_Down), Votes_Up_sum = sum(Votes_Up), Views_sum = sum(Views),Responses_sum = sum(Responses), Recommended_yes=sum(Recommended[Recommended==1])+1,
+Recommended_no = length(Recommended[Recommended==0]), ratio_yes_total = Recommended_yes/(Recommended_no+Recommended_yes))
+```
+
+```{r warning=FALSE}
+attach(authordf)
+authordf["sum_recommended"] = Recommended_no+Recommended_yes
+authordf["ratio_recommended"] = authordf$ratio_yes_total*10 +(Recommended_no+Recommended_yes)*0.35
+authordf <- subset(authordf, select=-Recommended_yes)
+authordf <- subset(authordf, select=-Recommended_no)
+authordf <- subset(authordf, select=-sum_recommended)
+authordf <- subset(authordf, select=-ratio_yes_total)
+detach(authordf)
+```
+
+#### **(l)** Feature Selection - Regression, Stepwise and Lasso
+
+<p>After assigning a rank to every author, we are trying various methods to check if the rank is predictable using the existing data.</p>
+
+> Linear Regression
+
+```{r warning=FALSE}
+options(scipen = 4)
+authordf.lm = lm(ratio_recommended~.,data = authordf)
+summary(authordf.lm)
+```
+**From the above linear regression model we can infer that the following features seem significant - Votes Down mean, Votes Up mean, views mean, responses mean, votes down sum, votes up sum, views sum and responses sum **
+
+> Pair Plots
+
+<p>Looking at the correlations between variables using Pair Plots</p>
+
+```{r}
+panel.cor <- function(x, y, digits = 2, prefix = "", cex.cor, ...)
+{
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    r <- abs(cor(x, y))
+    txt <- format(c(r, 0.123456789), digits = digits)[1]
+    txt <- paste0(prefix, txt)
+    if(missing(cex.cor)) cex.cor <- 0.8/strwidth(txt)
+    text(0.5, 0.5, txt, cex = pmax(1, cex.cor * r))
+}
+
+authordf.var.names = names(authordf)
+# Use panel.cor to display correlations in lower panel.
+pairs(authordf[,authordf.var.names], lower.panel = panel.cor)
+```
+
+<p>
+From the above results - we can infer that the following are highly corelated(above 0.89): 
+<div>
+<li>Votes_Up_Sum and Responses_Sum
+<li>Views_Sum and Responses_Sum
+<li>Author_ID and Tenure
+<li>Views_Sum and Votes_up_sum**
+</div>
+</p>
+
+> Best Subset 
+
+```{r}
+authordf <- na.omit(authordf)
+regfit.full <- regsubsets(ratio_recommended ~ ., authordf, nvmax = 12)
+reg.summary <- summary(regfit.full)
+reg.summary
+```
+<p>From the data above, some of the most predictive features include Responses_mean, Votes_Up_sum, Responses_sum,Votes_Up_mean and Votes_down_sum.</p>
+
+> R Square , RSS, AIC and BIC criterion minimizing models
+
+```{r}
+par(mfrow=c(2,2))
+plot(reg.summary$rss,xlab="Number of Variables",ylab="RSS",type="l")
+plot(reg.summary$adjr2,xlab="Number of Variables",ylab="Adjusted RSq",type="l")
+which.max(reg.summary$adjr2)
+
+points(11,reg.summary$adjr2[11], col="red",cex=2,pch=20)
+plot(reg.summary$cp,xlab="Number of Variables",ylab="Cp",type='l')
+which.min(reg.summary$cp)
+
+points(10,reg.summary$cp[10],col="red",cex=2,pch=20)
+which.min(reg.summary$bic)
+
+plot(reg.summary$bic,xlab="Number of Variables",ylab="BIC",type='l')
+points(6,reg.summary$bic[6],col="red",cex=2,pch=20)
+```
+
+>  LASSO
+
+```{r}
+x <- model.matrix(ratio_recommended~.,authordf)[,-1]
+y <- authordf$ratio_recommended
+
+# Split data into test and train
+set.seed(1)
+train <- sample(1:nrow(x), nrow(x)/2)
+test <- (-train)
+y.test <- y[test]
+
+# Predefined grid of lambda values:
+grid=10^seq(10,-2, length =100)
+
+lasso.mod=glmnet(x[train,],y[train],alpha=1,lambda=grid)
+plot(lasso.mod)
+
+set.seed(1)
+cv.out=cv.glmnet(x[train,],y[train],alpha=1)
+plot(cv.out)
+
+```
+
+```{r}
+lammin = cv.out$lambda.min
+lasso.pred=predict(lasso.mod,s=lammin,newx=x[test,])
+mean((lasso.pred-y.test)^2)
+
+lasso.coef=predict(cv.out,type="coefficients",s=lammin)[1:12,]
+
+lasso.coef
+```
+
+<p>The min lambda picks up all features. </p> 
+
+```{r}
+lam1se = cv.out$lambda.1se
+lasso.pred=predict(lasso.mod,s=lam1se,newx=x[test,])
+mean((lasso.pred-y.test)^2)
+
+lasso.coef=predict(cv.out,type="coefficients",s=lam1se)[1:12,]
+
+lasso.coef
+```
+
+<p>The 1SE lambda picks up 4 variables - Votes_Down_sum, Votes_Down_mean,Responses_sum and Responses_mean.</p>
+
+> Summary of Features Selected
+
+```{r}
+feature_data_Q3=read.xlsx("FeatureSelection-Q3.xlsx",sheetIndex = 1)
+kable(feature_data_Q3)
+```
+
+
+#### **(m)** Checking the MSE of a predictive model
+
+> Linear Prediction  with all features**
+
+<p>Taking all the features from the dataset, we are building a linear predictive model. It is notable that the MSE reduces after feature selection from previous steps.</p>
+
+```{r}
+authordf.lm = lm(ratio_recommended~.,data = authordf,subset=train)
+mse1 <- with(authordf, mean((ratio_recommended - predict(authordf.lm, authordf))[-train]^2))
+```
+
+```{r}
+print(paste0("Mean Square Error: ",mse1))
+predictions <- predict(authordf.lm, data = authordf, subset=test)
+actuals_preds <- data.frame(cbind(actuals=authordf$ratio_recommended, predicteds=predictions))
+min_max_accuracy <- mean(apply(actuals_preds, 1, min) / apply(actuals_preds, 1, max)) 
+print(paste0("accuracy : ", min_max_accuracy))
+```
+
+
+##**Linear Prediction  with selected features**
+
+```{r}
+authordf_filtered = subset(authordf,select = c(ratio_recommended, Votes_Up_mean , Responses_mean,Responses_sum,Votes_Up_sum))
+
+authordf.lm1 = lm(ratio_recommended~.,data = authordf_filtered,subset=train)
+mse1 <- with(authordf_filtered, mean((ratio_recommended - predict(authordf.lm1, authordf_filtered))[-train]^2))
+print(paste0("Mean Square Error : ",mse1))
+```
+**Ranking employees based on their ability to make good predictions **
+
+<p>We have aggregated the data based on Author_Id - through which we got the following columns like Responses_mean, Views_Sum, Votes_Up_mean etc. To determine whether the data will be appropriate to rank the employees on their ability to offer quality suggestions, we formulates a new column 'ratio_recommended'. This column is factor of the proportion of good recommendations based on which we will be able to rank authors on their suggestions. Yes, we can extend the same data to rank the employees. Our feature selection process has results in the following features being most significant:
+
+<di>
+<li>Votes_Up_Mean
+<li>Responses_Mean
+<li>Responses_Sum
+<li>Votes_Up_Sum
+</di>
+	
+The above features are not author specific i.e., they will get aggregated when certain employees are taken as a group. This means that certain employees can be aggregated to perform equal to good authors. Our process doesn't select features which are based on an individual like Tenure. Hence, we conclude that by taking employees in groups which have their 'ratio_recommended' higher than a certain threshold will improve the quality of recommendations in the company.
+
+Recommendations to your IT department: 
+
+Attributes:
+<di>
+<li>The can capture the sequence of the suggestions, whether some are followups to a certain or are new ones.
+<li>The category under which these suggestions fall.
+<li>The time the suggestion was made and hence we can calculate if a suggestion has higher views as it been there for a long time or was it recently posted.
+<li>Capture the authors who are voting and apply a weightage to vote depending on the rank of the author.
+</div>
+</p>
